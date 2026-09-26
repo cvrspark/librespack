@@ -19,7 +19,7 @@ spk::respack::key_to_string(const std::vector<uint8_t>& key); // std::string
 
 // packing
 spk::respack::pack(const std::string& dir, const std::string& output_pkg); // spk::respack::res (code, message)
-spk::respack::pack(const std::string& dir, const std::string& output_pkg, const std::vector<uint8_t>& key); // spk::res (code, message)
+spk::respack::pack(const std::string& dir, const std::string& output_pkg, const std::vector<uint8_t>& key); // spk::respack::res (code, message)
 
 // unpacking
 spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir); // spk::respack::res (code, message)
