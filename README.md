@@ -232,7 +232,7 @@ int main() {
 
     // or
     // const auto& filebuffer = read_res.files["data/player_data.json"];
-    // std::string content(buffer.begin(), buffer.end());
+    // std::string content(filebuffer.begin(), filebuffer.end());
     // std::cout << content << "\n";
     //
     // this works the same way, but the first option is way safer.
