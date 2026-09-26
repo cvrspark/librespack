@@ -24,7 +24,7 @@ spk::respack::pack(const std::string& dir, const std::string& output_pkg, const 
 // unpacking
 spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir); // spk::respack::res (code, message)
 spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir, const std::vector<uint8_t>& key); // spk::respack::res (code, message)
-// Note: output_dir specifies the directory created to hold unpacked files.
+// Note: output_dir specifies the directory created to hold unpacked files
 
 // reading from memory (without writing to disk)
 spk::respack::read_pack(const std::string& pkg_path); // spk::respack::read_res (code, message, map[filename : filecontent])
