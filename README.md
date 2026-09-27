@@ -44,7 +44,7 @@ spk::respack::open_pack(const std::string& pkg_path, const std::vector<uint8_t>&
 ```cpp
 #include <iostream>
 #include <string>
-#include "librespack.hxx"
+#include "librespack.hpp"
 
 int main() {
     std::string key_str = "dmPJQedEs4LtX7z55TPzMQk28vrBUrOEkXOrM_8xrrw";
@@ -66,7 +66,7 @@ int main() {
 ```cpp
 #include <iostream>
 #include <string>
-#include "librespack.hxx"
+#include "librespack.hpp"
 
 int main() {
     std::string key_str = "dmPJQedEs4LtX7z55TPzMQk28vrBUrOEkXOrM_8xrrw"; // random key
@@ -88,7 +88,7 @@ int main() {
 ```cpp
 #include <iostream>
 #include <string>
-#include "librespack.hxx"
+#include "librespack.hpp"
 
 namespace fs = std::filesystem;
 
@@ -127,7 +127,7 @@ int main() {
 ```cpp
 #include <iostream>
 #include <string>
-#include "librespack.hxx"
+#include "librespack.hpp"
 
 int main() {
     const std::string archive_path = "assets.rvlt";
@@ -163,7 +163,7 @@ int main() {
 ```cpp
 #include <iostream>
 #include <string>
-#include "librespack.hxx"
+#include "librespack.hpp"
 #include "raylib.h"
 
 int main() {
@@ -246,7 +246,7 @@ int main() {
 // Logging string or text file content
 #include <iostream>
 #include <string>
-#include "librespack.hxx"
+#include "librespack.hpp"
 
 // if using read_pack
 int main() {
