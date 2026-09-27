@@ -1,6 +1,6 @@
 /*
                                                             oooo
-lib                                                         `888
+LIB                                                         `888
 oooo d8b  .ooooo.   .oooo.o oo.ooooo.   .oooo.    .ooooo.   888  oooo
 `888""8P d88' `88b d88(  "8  888' `88b `P  )88b  d88' `"Y8  888 .8P'
  888     888ooo888 `"Y88b.   888   888  .oP"888  888        888888.
@@ -54,13 +54,6 @@ enum class status { ok = 0, io_error, crypto_error, invalid_argument, corrupted_
 struct res {
     status code;
     std::string message;
-    explicit operator bool() const { return code == status::ok; }
-};
-
-struct read_res {
-    status code;
-    std::string message;
-    std::unordered_map<std::string, std::vector<uint8_t>> files;
     explicit operator bool() const { return code == status::ok; }
 };
 
@@ -257,15 +250,19 @@ inline void chacha20_crypt(std::vector<uint8_t>& data, const std::vector<uint8_t
     }
 }
 
-inline uint32_t calculate_crc32(const std::vector<uint8_t>& data) {
+inline uint32_t calculate_crc32(const uint8_t* data, size_t size) {
     uint32_t crc = 0xFFFFFFFF;
-    for (uint8_t byte : data) {
-        crc ^= byte;
-        for (int i = 0; i < 8; ++i) {
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) {
             crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
         }
     }
     return ~crc;
+}
+
+inline uint32_t calculate_crc32(const std::vector<uint8_t>& data) {
+    return calculate_crc32(data.data(), data.size());
 }
 
 inline bool is_valid_key(const std::vector<uint8_t>& key) { return key.size() == 32; }
@@ -315,6 +312,197 @@ inline res decrypt_payload(std::vector<uint8_t>& payload, const std::vector<uint
 }
 
 } // namespace crypto
+
+struct read_res {
+    status code;
+    std::string message;
+    std::unordered_map<std::string, std::vector<uint8_t>> files;
+    explicit operator bool() const { return code == status::ok; }
+};
+
+struct pack_entry {
+    std::string filename;
+    size_t offset = 0;
+    uint32_t size = 0;
+    uint32_t crc32 = 0;
+    bool is_directory = false;
+};
+
+struct file_view {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    explicit operator bool() const { return data != nullptr; }
+};
+
+struct file_res {
+    status code = status::ok;
+    std::string message;
+    std::vector<uint8_t> data;
+    explicit operator bool() const { return code == status::ok; }
+};
+
+class package {
+public:
+    package() = default;
+
+    bool is_open() const { return is_loaded_; }
+    explicit operator bool() const { return is_loaded_; }
+
+    bool contains(const std::string& filename) const {
+        return entries_.find(filename) != entries_.end();
+    }
+
+    size_t file_count() const {
+        return entries_.size();
+    }
+
+    std::vector<std::string> list_files() const {
+        std::vector<std::string> list;
+        list.reserve(entries_.size());
+        for (const auto& [name, meta] : entries_) {
+            list.push_back(name);
+        }
+        return list;
+    }
+
+    const std::unordered_map<std::string, pack_entry>& entries() const {
+        return entries_;
+    }
+
+    file_res read_file(const std::string& filename) const {
+        auto it = entries_.find(filename);
+        if (it == entries_.end()) {
+            return {status::invalid_argument, "File not found in package: " + filename, {}};
+        }
+        const auto& meta = it->second;
+        if (meta.is_directory) {
+            return {status::invalid_argument, "Path is a directory, not a file: " + filename, {}};
+        }
+        if (meta.offset + meta.size > buffer_.size()) {
+            return {status::corrupted_data, "File offset out of bounds: " + filename, {}};
+        }
+
+        if (crypto::calculate_crc32(buffer_.data() + meta.offset, meta.size) != meta.crc32) {
+            return {status::corrupted_data, "CRC32 mismatch on file: " + filename, {}};
+        }
+
+        std::vector<uint8_t> file_data(buffer_.begin() + meta.offset, buffer_.begin() + meta.offset + meta.size);
+        return {status::ok, "", std::move(file_data)};
+    }
+
+    std::vector<uint8_t> get(const std::string& filename) const {
+        auto res = read_file(filename);
+        if (res) return std::move(res.data);
+        return {};
+    }
+
+    res read_file(const std::string& filename, std::vector<uint8_t>& out_data) const {
+        auto res_single = read_file(filename);
+        if (!res_single) {
+            return {res_single.code, res_single.message};
+        }
+        out_data = std::move(res_single.data);
+        return {status::ok, ""};
+    }
+
+    file_view get_view(const std::string& filename) const {
+        auto it = entries_.find(filename);
+        if (it == entries_.end()) return {};
+        const auto& meta = it->second;
+        if (meta.is_directory || meta.offset + meta.size > buffer_.size()) return {};
+        if (crypto::calculate_crc32(buffer_.data() + meta.offset, meta.size) != meta.crc32) return {};
+        return {buffer_.data() + meta.offset, meta.size};
+    }
+
+    const std::vector<uint8_t>& buffer() const { return buffer_; }
+
+    void close() {
+        buffer_.clear();
+        buffer_.shrink_to_fit();
+        entries_.clear();
+        is_loaded_ = false;
+    }
+
+    res init(std::vector<uint8_t> buf, const std::vector<uint8_t>* key) {
+        close();
+        buffer_ = std::move(buf);
+
+        if (key && !key->empty()) {
+            auto crypt_res = crypto::decrypt_payload(buffer_, *key);
+            if (crypt_res.code != status::ok) {
+                buffer_.clear();
+                return crypt_res;
+            }
+        }
+
+        using namespace archive;
+        size_t cursor = 0;
+        LocalFileHeader lfh{};
+        while (util::read_struct(buffer_, cursor, lfh)) {
+            if (lfh.signature != SIGNATURE_LOCAL_FILE_HEADER)
+                break;
+
+            cursor += sizeof(LocalFileHeader);
+
+            const size_t rem_buf = buffer_.size() - cursor;
+            const size_t header_payload_len = static_cast<size_t>(lfh.file_name_length) + lfh.extra_field_length;
+
+            if (header_payload_len > rem_buf || lfh.compressed_size > (rem_buf - header_payload_len)) {
+                buffer_.clear();
+                return {status::corrupted_data, "Corrupted archive stream or unexpected EOF."};
+            }
+
+            std::string filename(reinterpret_cast<const char*>(buffer_.data() + cursor), lfh.file_name_length);
+            cursor += lfh.file_name_length + lfh.extra_field_length;
+
+            const bool is_directory = !filename.empty() && filename.back() == '/';
+
+            pack_entry entry;
+            entry.filename = filename;
+            entry.offset = cursor;
+            entry.size = lfh.compressed_size;
+            entry.crc32 = lfh.crc32;
+            entry.is_directory = is_directory;
+
+            cursor += lfh.compressed_size;
+            entries_[std::move(filename)] = std::move(entry);
+        }
+
+        if (entries_.empty() && !buffer_.empty()) {
+            buffer_.clear();
+            if (key && !key->empty()) {
+                return {status::crypto_error, "Failed to parse archive header. Invalid decryption key or corrupted data."};
+            } else {
+                return {status::corrupted_data, "Invalid package format or header signature mismatch."};
+            }
+        }
+
+        is_loaded_ = true;
+        return {status::ok, "Package opened successfully."};
+    }
+
+private:
+    std::vector<uint8_t> buffer_;
+    std::unordered_map<std::string, pack_entry> entries_;
+    bool is_loaded_ = false;
+};
+
+struct open_res {
+    status code = status::ok;
+    std::string message;
+    package pkg;
+
+    explicit operator bool() const { return code == status::ok; }
+
+    bool is_open() const { return code == status::ok && pkg.is_open(); }
+    bool contains(const std::string& filename) const { return pkg.contains(filename); }
+    size_t file_count() const { return pkg.file_count(); }
+    std::vector<std::string> list_files() const { return pkg.list_files(); }
+    file_res read_file(const std::string& filename) const { return pkg.read_file(filename); }
+    std::vector<uint8_t> get(const std::string& filename) const { return pkg.get(filename); }
+    res read_file(const std::string& filename, std::vector<uint8_t>& out_data) const { return pkg.read_file(filename, out_data); }
+    file_view get_view(const std::string& filename) const { return pkg.get_view(filename); }
+};
 
 namespace detail {
 
@@ -546,7 +734,7 @@ inline res pack_internal(const std::string& dir, const std::string& output_pkg, 
         cdh.file_name_length = static_cast<uint16_t>(meta.rel_path.size());
         cdh.relative_offset_local_header = meta.local_header_offset;
         if (meta.is_directory) {
-            cdh.external_file_attrib = 0x10; // Directory attribute flag
+            cdh.external_file_attrib = 0x10;
         }
 
         util::append_struct(zip_stream, cdh);
@@ -729,6 +917,38 @@ inline read_res read_pack_internal(const std::string& pkg_path, const std::vecto
     return {status::ok, "Read package successfully.", std::move(files)};
 }
 
+inline open_res open_pack_internal(std::vector<uint8_t> buffer, const std::vector<uint8_t>* key) {
+    if (buffer.empty()) {
+        return {status::invalid_argument, "Package buffer is empty or unreadable.", {}};
+    }
+
+    package pkg;
+    auto res = pkg.init(std::move(buffer), key);
+    if (res.code != status::ok) {
+        return {res.code, res.message, {}};
+    }
+
+    return {status::ok, "Package opened successfully.", std::move(pkg)};
+}
+
+inline open_res open_pack_internal(const std::string& pkg_path, const std::vector<uint8_t>* key) {
+    std::ifstream in(pkg_path, std::ios::binary | std::ios::ate);
+    if (!in.is_open())
+        return {status::io_error, "Failed to open package file.", {}};
+
+    const auto file_size = in.tellg();
+    if (file_size <= 0)
+        return {status::invalid_argument, "Package file is empty or unreadable.", {}};
+
+    in.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buffer(static_cast<size_t>(file_size));
+    if (!in.read(reinterpret_cast<char*>(buffer.data()), file_size)) {
+        return {status::io_error, "Failed to read package file into memory.", {}};
+    }
+
+    return open_pack_internal(std::move(buffer), key);
+}
+
 } // namespace detail
 
 inline res pack(const std::string& dir, const std::string& output_pkg) { 
@@ -756,6 +976,15 @@ inline read_res read_pack(const std::string& pkg_path, const std::vector<uint8_t
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty.", {}};
     return detail::read_pack_internal(pkg_path, &key);
+}
+
+inline open_res open_pack(const std::string& pkg_path) {
+    return detail::open_pack_internal(pkg_path, nullptr);
+}
+inline open_res open_pack(const std::string& pkg_path, const std::vector<uint8_t>& key) {
+    if (key.empty())
+        return {status::invalid_argument, "Key cannot be empty.", {}};
+    return detail::open_pack_internal(pkg_path, &key);
 }
 
 } // namespace spk::respack

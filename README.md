@@ -29,6 +29,10 @@ spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir,
 // reading from memory (without writing to disk)
 spk::respack::read_pack(const std::string& pkg_path); // spk::respack::read_res (code, message, map[filename : filecontent])
 spk::respack::read_pack(const std::string& pkg_path, const std::vector<uint8_t>& key); // spk::respack::read_res (code, message, map[filename : filecontent])
+
+// reading from memory (lazy)
+spk::respack::open_pack(const std::string& pkg_path); // spk::respack::open_res (code, message, package)
+spk::respack::open_pack(const std::string& pkg_path, const std::vector<uint8_t>& key); // spk::respack::open_res (code, message, package)
 ```
 
 ---
@@ -49,7 +53,7 @@ int main() {
     // first arg is the target dir to pack, second is the package name, third is the key (optional)
 
     if (!pack_res) {
-        util::exit(pack_res.code, pack_res.message);
+        std::cerr << "Failed to open pack: " << res.message << "\n";
     }
     std::cout << "Successfully packed resource folder.\n";
     return 0;
@@ -71,7 +75,7 @@ int main() {
     // first arg is the target pack, second is the final directory name, third is the key (optional)
     
     if (!pack_res) {
-        util::exit(pack_res.code, pack_res.message);
+        std::cerr << "Failed to open pack: " << res.message << "\n";
     }
     std::cout << "Successfully unpacked resource folder.\n";
     return 0;
@@ -79,12 +83,11 @@ int main() {
 
 ```
 
-### Reading from RAM
+### Reading from RAM (Eager)
 
 ```cpp
 #include <iostream>
 #include <string>
-#include <filesystem>
 #include "librespack.hxx"
 
 namespace fs = std::filesystem;
@@ -119,6 +122,40 @@ int main() {
 }
 ```
 
+## Reading from RAM (Lazy-load)
+
+```cpp
+#include <iostream>
+#include <string>
+#include "librespack.hxx"
+
+int main() {
+    const std::string archive_path = "assets.rvlt";
+    const std::string key_str = "dmPJQedEs4LtX7z55TPzMQk28vrBUrOEkXOrM_8xrrw"; // random key
+
+    auto key = spk::respack::key_from_string(key_str);
+    auto res = spk::respack::open_pack(archive_path, key);
+
+    if (!res) {
+        std::cerr << "Failed to open pack: " << res.message << "\n";
+        return 1;
+    }
+
+    // Check if the file exists before attempting to read
+    if (res.contains("textures/player.png")) {
+        // Returns pointer + size into the loaded package memory
+        auto view = res.get_view("textures/player.png");
+        std::cout << "Zero-copy file size: " << view.size() << " bytes\n";
+
+        // Allocates and copies bytes into a std::vector<uint8_t> on demand
+        auto /*std::vector<uint8_t>*/ buffer = res.get("textures/player.png");
+        std::cout << "Copied buffer size: " << buffer.size() << " bytes\n";
+    }
+
+    return 0;
+}
+```
+
 ---
 
 ## Raylib Integration Example
@@ -147,7 +184,7 @@ int main() {
 
     auto file_it = read_res.files.find("textures/player.png");
     if (file_it != read_res.files.end()) {
-        const std::vector<uint8_t>& buffer = file_it->second;
+        const std::vector<uint8_t>& buffer = file_it->second; // at the end its always a vector or pure byes (get_view), so +- same usage
 
         // Load image directly from memory buffer
         Image img = LoadImageFromMemory(
@@ -209,9 +246,9 @@ int main() {
 // Logging string or text file content
 #include <iostream>
 #include <string>
-#include <filesystem>
 #include "librespack.hxx"
 
+// if using read_pack
 int main() {
     const std::string archive_path = "assets.rvlt";
     const std::string key_str = "dmPJQedEs4LtX7z55TPzMQk28vrBUrOEkXOrM_8xrrw"; // random key
@@ -236,6 +273,73 @@ int main() {
     // std::cout << content << "\n";
     //
     // this works the same way, but the first option is way safer.
+
+    return 0;
+}
+
+// if using open_pack
+int main() {
+    const std::string archive_path = "assets.rvlt";
+    const std::string key_str = "dmPJQedEs4LtX7z55TPzMQk28vrBUrOEkXOrM_8xrrw"; // random key
+
+    auto key = spk::respack::key_from_string(key_str);
+
+    auto res = spk::respack::open_pack(archive_path, key);
+    if (!res) {
+        std::cerr << "Failed to open pack: " << res.message << "\n";
+        return 1;
+    }
+
+    const std::string target_file = "data/player_data.json";
+
+    // get_view: Zero-Copy View (Preferred for reading/parsing)
+    // Returns: file_view { data, size }
+    // Allocations: 0
+    if (res.contains(target_file)) {
+        auto view = res.get_view(target_file);
+        if (view) {
+            std::string_view content(reinterpret_cast<const char*>(view.data), view.size);
+            std::cout << "[get_view]\n" << content << "\n\n";
+        }
+    }
+
+    // get: Direct Shorthand
+    // Returns: std::vector<uint8_t> (empty vector if failed)
+    // Allocations: Copies data into a new vector
+    if (res.contains(target_file)) {
+        std::vector<uint8_t> buffer = res.get(target_file);
+        if (!buffer.empty()) {
+            std::string content(buffer.begin(), buffer.end());
+            std::cout << "[get]\n" << content << "\n\n";
+        }
+    }
+
+    // read_file(filename): Explicit Result with Error Details
+    // Returns: file_res { code, message, data }
+    // Allocations: Copies data into a new vector inside file_res
+    if (res.contains(target_file)) { // u can avoid this statement
+        auto file_res = res.read_file(target_file);
+        if (file_res) {
+            std::string content(file_res.data.begin(), file_res.data.end());
+            std::cout << "[read_file]\n" << content << "\n\n";
+        } else {
+            std::cerr << "Error reading " << target_file << ": " << file_res.message << "\n";
+        }
+    }
+
+    // read_file(filename, out_data): Buffer Reuse (Allocation Efficient)
+    // Returns: res { code, message }
+    // Allocations: Reuses an existing std::vector<uint8_t>
+    if (res.contains(target_file)) { // u can avoid this statement
+        std::vector<uint8_t> buffer;
+        auto r = res.read_file(target_file, buffer);
+        if (r) {
+            std::string content(buffer.begin(), buffer.end());
+            std::cout << "[read_file with out parameter]\n" << content << "\n\n";
+        } else {
+            std::cerr << "Error reading " << target_file << ": " << r.message << "\n";
+        }
+    }
 
     return 0;
 }
