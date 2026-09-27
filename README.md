@@ -122,7 +122,7 @@ int main() {
 }
 ```
 
-## Reading from RAM (Lazy-load)
+### Reading from RAM (Lazy-load)
 
 ```cpp
 #include <iostream>
