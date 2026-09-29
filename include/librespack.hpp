@@ -35,12 +35,14 @@ SOFTWARE.
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -214,7 +216,7 @@ inline void generate_nonce(uint8_t nonce[12]) {
     }
 }
 
-inline void chacha20_crypt(std::vector<uint8_t>& data, const std::vector<uint8_t>& key, const uint8_t nonce[12], uint32_t initial_counter = 1) {
+inline void chacha20_crypt(std::vector<uint8_t>& data, std::span<const uint8_t> key, const uint8_t nonce[12], uint32_t initial_counter = 1) {
     if (key.size() != 32)
         return;
 
@@ -265,9 +267,9 @@ inline uint32_t calculate_crc32(const std::vector<uint8_t>& data) {
     return calculate_crc32(data.data(), data.size());
 }
 
-inline bool is_valid_key(const std::vector<uint8_t>& key) { return key.size() == 32; }
+inline bool is_valid_key(std::span<const uint8_t> key) { return key.size() == 32; }
 
-inline res encrypt_payload(std::vector<uint8_t>& payload, const std::vector<uint8_t>& key) {
+inline res encrypt_payload(std::vector<uint8_t>& payload, std::span<const uint8_t> key) {
     if (!is_valid_key(key)) {
         return {status::invalid_argument, "Key must be exactly 32 bytes (256 bits)."};
     }
@@ -289,7 +291,7 @@ inline res encrypt_payload(std::vector<uint8_t>& payload, const std::vector<uint
     return {status::ok, ""};
 }
 
-inline res decrypt_payload(std::vector<uint8_t>& payload, const std::vector<uint8_t>& key) {
+inline res decrypt_payload(std::vector<uint8_t>& payload, std::span<const uint8_t> key) {
     if (!is_valid_key(key)) {
         return {status::invalid_argument, "Key must be exactly 32 bytes (256 bits)."};
     }
@@ -423,12 +425,12 @@ public:
         is_loaded_ = false;
     }
 
-    res init(std::vector<uint8_t> buf, const std::vector<uint8_t>* key) {
+    res init(std::vector<uint8_t> buf, std::span<const uint8_t> key = {}) {
         close();
         buffer_ = std::move(buf);
 
-        if (key && !key->empty()) {
-            auto crypt_res = crypto::decrypt_payload(buffer_, *key);
+        if (!key.empty()) {
+            auto crypt_res = crypto::decrypt_payload(buffer_, key);
             if (crypt_res.code != status::ok) {
                 buffer_.clear();
                 return crypt_res;
@@ -470,7 +472,7 @@ public:
 
         if (entries_.empty() && !buffer_.empty()) {
             buffer_.clear();
-            if (key && !key->empty()) {
+            if (!key.empty()) {
                 return {status::crypto_error, "Failed to parse archive header. Invalid decryption key or corrupted data."};
             } else {
                 return {status::corrupted_data, "Invalid package format or header signature mismatch."};
@@ -526,7 +528,7 @@ inline uint8_t base64url_char_to_val(char c) {
 
 } // namespace detail
 
-inline std::string key_to_string(const std::vector<uint8_t>& key) {
+inline std::string key_to_string(std::span<const uint8_t> key) {
     std::string result;
     result.reserve(((key.size() + 2) / 3) * 4);
 
@@ -563,31 +565,31 @@ inline std::string key_to_string(const std::vector<uint8_t>& key) {
     return result;
 }
 
-inline std::vector<uint8_t> key_from_string(const std::string& key_str) {
-    std::vector<uint8_t> key;
+inline std::array<uint8_t, 32> key_from_string(const std::string& key_str) {
+    std::array<uint8_t, 32> key{};
     size_t len = key_str.size();
 
     if (len == 0)
         return key;
 
-    key.reserve((len * 3) / 4);
-
     size_t i = 0;
-    while (len >= 4) {
+    size_t out_idx = 0;
+
+    while (len >= 4 && out_idx + 3 <= 32) {
         uint32_t val = (static_cast<uint32_t>(detail::base64url_char_to_val(key_str[i])) << 18) |
                        (static_cast<uint32_t>(detail::base64url_char_to_val(key_str[i + 1])) << 12) |
                        (static_cast<uint32_t>(detail::base64url_char_to_val(key_str[i + 2])) << 6) |
                        static_cast<uint32_t>(detail::base64url_char_to_val(key_str[i + 3]));
 
-        key.push_back((val >> 16) & 0xFF);
-        key.push_back((val >> 8) & 0xFF);
-        key.push_back(val & 0xFF);
+        key[out_idx++] = (val >> 16) & 0xFF;
+        key[out_idx++] = (val >> 8) & 0xFF;
+        key[out_idx++] = val & 0xFF;
 
         i += 4;
         len -= 4;
     }
 
-    if (len == 3) {
+    if (len == 3 && out_idx + 2 <= 32) {
         uint8_t c0 = detail::base64url_char_to_val(key_str[i]);
         uint8_t c1 = detail::base64url_char_to_val(key_str[i + 1]);
         uint8_t c2 = detail::base64url_char_to_val(key_str[i + 2]);
@@ -600,9 +602,9 @@ inline std::vector<uint8_t> key_from_string(const std::string& key_str) {
                        (static_cast<uint32_t>(c1) << 12) |
                        (static_cast<uint32_t>(c2) << 6);
 
-        key.push_back((val >> 16) & 0xFF);
-        key.push_back((val >> 8) & 0xFF);
-    } else if (len == 2) {
+        key[out_idx++] = (val >> 16) & 0xFF;
+        key[out_idx++] = (val >> 8) & 0xFF;
+    } else if (len == 2 && out_idx + 1 <= 32) {
         uint8_t c0 = detail::base64url_char_to_val(key_str[i]);
         uint8_t c1 = detail::base64url_char_to_val(key_str[i + 1]);
 
@@ -613,7 +615,7 @@ inline std::vector<uint8_t> key_from_string(const std::string& key_str) {
         uint32_t val = (static_cast<uint32_t>(c0) << 18) |
                        (static_cast<uint32_t>(c1) << 12);
 
-        key.push_back((val >> 16) & 0xFF);
+        key[out_idx++] = (val >> 16) & 0xFF;
     } else if (len == 1) {
         throw std::invalid_argument("Invalid base64url string length.");
     }
@@ -623,7 +625,7 @@ inline std::vector<uint8_t> key_from_string(const std::string& key_str) {
 
 namespace detail {
 
-inline res pack_internal(const std::string& dir, const std::string& output_pkg, const std::vector<uint8_t>* key) {
+inline res pack_internal(const std::string& dir, const std::string& output_pkg, std::span<const uint8_t> key = {}) {
     namespace fs = std::filesystem;
     using namespace spk::respack::archive;
 
@@ -749,8 +751,8 @@ inline res pack_internal(const std::string& dir, const std::string& output_pkg, 
 
     util::append_struct(zip_stream, eocd);
 
-    if (key && !key->empty()) {
-        auto crypt_res = crypto::encrypt_payload(zip_stream, *key);
+    if (!key.empty()) {
+        auto crypt_res = crypto::encrypt_payload(zip_stream, key);
         if (crypt_res.code != status::ok)
             return crypt_res;
     }
@@ -767,7 +769,7 @@ inline res pack_internal(const std::string& dir, const std::string& output_pkg, 
     return {status::ok, "Package created successfully."};
 }
 
-inline res unpack_internal(const std::string& pkg_path, const std::string& output_dir, const std::vector<uint8_t>* key) {
+inline res unpack_internal(const std::string& pkg_path, const std::string& output_dir, std::span<const uint8_t> key = {}) {
     namespace fs = std::filesystem;
     using namespace spk::respack::archive;
 
@@ -785,8 +787,8 @@ inline res unpack_internal(const std::string& pkg_path, const std::string& outpu
         return {status::io_error, "Failed to read package file into memory."};
     }
 
-    if (key && !key->empty()) {
-        auto crypt_res = crypto::decrypt_payload(buffer, *key);
+    if (!key.empty()) {
+        auto crypt_res = crypto::decrypt_payload(buffer, key);
         if (crypt_res.code != status::ok)
             return crypt_res;
     }
@@ -854,7 +856,7 @@ inline res unpack_internal(const std::string& pkg_path, const std::string& outpu
     return {status::ok, "Unpacked successfully."};
 }
 
-inline read_res read_pack_internal(const std::string& pkg_path, const std::vector<uint8_t>* key) {
+inline read_res read_pack_internal(const std::string& pkg_path, std::span<const uint8_t> key = {}) {
     using namespace spk::respack::archive;
 
     std::ifstream in(pkg_path, std::ios::binary | std::ios::ate);
@@ -871,8 +873,8 @@ inline read_res read_pack_internal(const std::string& pkg_path, const std::vecto
         return {status::io_error, "Failed to read package file into memory.", {}};
     }
 
-    if (key && !key->empty()) {
-        auto crypt_res = crypto::decrypt_payload(buffer, *key);
+    if (!key.empty()) {
+        auto crypt_res = crypto::decrypt_payload(buffer, key);
         if (crypt_res.code != status::ok)
             return {crypt_res.code, crypt_res.message, {}};
     }
@@ -917,7 +919,7 @@ inline read_res read_pack_internal(const std::string& pkg_path, const std::vecto
     return {status::ok, "Read package successfully.", std::move(files)};
 }
 
-inline open_res open_pack_internal(std::vector<uint8_t> buffer, const std::vector<uint8_t>* key) {
+inline open_res open_pack_internal(std::vector<uint8_t> buffer, std::span<const uint8_t> key = {}) {
     if (buffer.empty()) {
         return {status::invalid_argument, "Package buffer is empty or unreadable.", {}};
     }
@@ -931,7 +933,7 @@ inline open_res open_pack_internal(std::vector<uint8_t> buffer, const std::vecto
     return {status::ok, "Package opened successfully.", std::move(pkg)};
 }
 
-inline open_res open_pack_internal(const std::string& pkg_path, const std::vector<uint8_t>* key) {
+inline open_res open_pack_internal(const std::string& pkg_path, std::span<const uint8_t> key = {}) {
     std::ifstream in(pkg_path, std::ios::binary | std::ios::ate);
     if (!in.is_open())
         return {status::io_error, "Failed to open package file.", {}};
@@ -952,39 +954,39 @@ inline open_res open_pack_internal(const std::string& pkg_path, const std::vecto
 } // namespace detail
 
 inline res pack(const std::string& dir, const std::string& output_pkg) { 
-    return detail::pack_internal(dir, output_pkg, nullptr); 
+    return detail::pack_internal(dir, output_pkg); 
 }
-inline res pack(const std::string& dir, const std::string& output_pkg, const std::vector<uint8_t>& key) {
+inline res pack(const std::string& dir, const std::string& output_pkg, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty."};
-    return detail::pack_internal(dir, output_pkg, &key);
+    return detail::pack_internal(dir, output_pkg, key);
 }
 
 inline res unpack(const std::string& pkg_path, const std::string& output_dir) { 
-    return detail::unpack_internal(pkg_path, output_dir, nullptr); 
+    return detail::unpack_internal(pkg_path, output_dir); 
 }
-inline res unpack(const std::string& pkg_path, const std::string& output_dir, const std::vector<uint8_t>& key) {
+inline res unpack(const std::string& pkg_path, const std::string& output_dir, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty."};
-    return detail::unpack_internal(pkg_path, output_dir, &key);
+    return detail::unpack_internal(pkg_path, output_dir, key);
 }
 
 inline read_res read_pack(const std::string& pkg_path) {
-    return detail::read_pack_internal(pkg_path, nullptr);
+    return detail::read_pack_internal(pkg_path);
 }
-inline read_res read_pack(const std::string& pkg_path, const std::vector<uint8_t>& key) {
+inline read_res read_pack(const std::string& pkg_path, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty.", {}};
-    return detail::read_pack_internal(pkg_path, &key);
+    return detail::read_pack_internal(pkg_path, key);
 }
 
 inline open_res open_pack(const std::string& pkg_path) {
-    return detail::open_pack_internal(pkg_path, nullptr);
+    return detail::open_pack_internal(pkg_path);
 }
-inline open_res open_pack(const std::string& pkg_path, const std::vector<uint8_t>& key) {
+inline open_res open_pack(const std::string& pkg_path, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty.", {}};
-    return detail::open_pack_internal(pkg_path, &key);
+    return detail::open_pack_internal(pkg_path, key);
 }
 
 } // namespace spk::respack

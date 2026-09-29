@@ -14,25 +14,25 @@ d888b    `Y8bod8P' 8""888P'  888bod8P' `Y888""8o `Y8bod8P' o888o o888o
 ## Main functions
 ```cpp
 // key converters
-spk::respack::key_from_string(const std::string& key_str); // std::vector<uint8_t>
-spk::respack::key_to_string(const std::vector<uint8_t>& key); // std::string
+spk::respack::key_from_string(const std::string& key_str); // std::array<uint8_t, 32>
+spk::respack::key_to_string(std::span<const uint8_t> key); // std::string
 
 // packing
 spk::respack::pack(const std::string& dir, const std::string& output_pkg); // spk::respack::res (code, message)
-spk::respack::pack(const std::string& dir, const std::string& output_pkg, const std::vector<uint8_t>& key); // spk::respack::res (code, message)
+spk::respack::pack(const std::string& dir, const std::string& output_pkg, std::span<const uint8_t> key); // spk::respack::res (code, message)
 
 // unpacking
 spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir); // spk::respack::res (code, message)
-spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir, const std::vector<uint8_t>& key); // spk::respack::res (code, message)
+spk::respack::unpack(const std::string& pkg_path, const std::string& output_dir, std::span<const uint8_t> key); // spk::respack::res (code, message)
 // Note: output_dir specifies the directory created to hold unpacked files
 
 // reading from memory (without writing to disk)
 spk::respack::read_pack(const std::string& pkg_path); // spk::respack::read_res (code, message, map[filename : filecontent])
-spk::respack::read_pack(const std::string& pkg_path, const std::vector<uint8_t>& key); // spk::respack::read_res (code, message, map[filename : filecontent])
+spk::respack::read_pack(const std::string& pkg_path, std::span<const uint8_t> key); // spk::respack::read_res (code, message, map[filename : filecontent])
 
 // reading from memory (lazy)
 spk::respack::open_pack(const std::string& pkg_path); // spk::respack::open_res (code, message, package)
-spk::respack::open_pack(const std::string& pkg_path, const std::vector<uint8_t>& key); // spk::respack::open_res (code, message, package)
+spk::respack::open_pack(const std::string& pkg_path, std::span<const uint8_t> key); // spk::respack::open_res (code, message, package)
 ```
 
 ---
