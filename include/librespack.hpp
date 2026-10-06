@@ -36,6 +36,7 @@ SOFTWARE.
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -253,12 +254,21 @@ inline void chacha20_crypt(std::vector<uint8_t>& data, std::span<const uint8_t> 
 }
 
 inline uint32_t calculate_crc32(const uint8_t* data, size_t size) {
+    static constexpr auto table = []() {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+            }
+            t[i] = c;
+        }
+        return t;
+    }();
+
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < size; ++i) {
-        crc ^= data[i];
-        for (int b = 0; b < 8; ++b) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-        }
+        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     }
     return ~crc;
 }
@@ -331,9 +341,8 @@ struct pack_entry {
 };
 
 struct file_view {
-    const uint8_t* data = nullptr;
-    size_t size = 0;
-    explicit operator bool() const { return data != nullptr; }
+    std::span<const uint8_t> data;
+    explicit operator bool() const { return !data.empty(); }
 };
 
 struct file_res {
@@ -413,7 +422,7 @@ public:
         const auto& meta = it->second;
         if (meta.is_directory || meta.offset + meta.size > buffer_.size()) return {};
         if (crypto::calculate_crc32(buffer_.data() + meta.offset, meta.size) != meta.crc32) return {};
-        return {buffer_.data() + meta.offset, meta.size};
+        return { std::span{buffer_.data() + meta.offset, meta.size} };
     }
 
     const std::vector<uint8_t>& buffer() const { return buffer_; }
@@ -625,18 +634,16 @@ inline std::array<uint8_t, 32> key_from_string(const std::string& key_str) {
 
 namespace detail {
 
-inline res pack_internal(const std::string& dir, const std::string& output_pkg, std::span<const uint8_t> key = {}) {
+inline res pack_internal(const std::filesystem::path& dir, const std::filesystem::path& output_pkg, std::span<const uint8_t> key = {}) {
     namespace fs = std::filesystem;
     using namespace spk::respack::archive;
 
-    fs::path src_dir(dir);
-
     std::error_code ec;
-    if (!fs::exists(src_dir, ec) || !fs::is_directory(src_dir, ec)) {
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
         return {status::invalid_argument, "Source directory does not exist or is not a directory."};
     }
 
-    fs::path out_path(output_pkg);
+    fs::path out_path = output_pkg;
     if (out_path.extension().empty()) {
         out_path += ".rvlt";
     }
@@ -644,7 +651,7 @@ inline res pack_internal(const std::string& dir, const std::string& output_pkg, 
     std::vector<uint8_t> zip_stream;
     std::vector<ZipEntryMeta> entries;
 
-    auto dir_iter = fs::recursive_directory_iterator(src_dir, fs::directory_options::skip_permission_denied, ec);
+    auto dir_iter = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
     if (ec) {
         return {status::io_error, "Failed to iterate source directory: " + ec.message()};
     }
@@ -654,7 +661,7 @@ inline res pack_internal(const std::string& dir, const std::string& output_pkg, 
         const bool is_file = entry.is_regular_file(ec);
 
         if (is_file || is_dir) {
-            std::string rel_path = fs::relative(entry.path(), src_dir, ec).generic_string();
+            std::string rel_path = fs::relative(entry.path(), dir, ec).generic_string();
             if (ec) {
                 return {status::io_error, "Failed to resolve relative path."};
             }
@@ -769,7 +776,7 @@ inline res pack_internal(const std::string& dir, const std::string& output_pkg, 
     return {status::ok, "Package created successfully."};
 }
 
-inline res unpack_internal(const std::string& pkg_path, const std::string& output_dir, std::span<const uint8_t> key = {}) {
+inline res unpack_internal(const std::filesystem::path& pkg_path, const std::filesystem::path& output_dir, std::span<const uint8_t> key = {}) {
     namespace fs = std::filesystem;
     using namespace spk::respack::archive;
 
@@ -820,13 +827,20 @@ inline res unpack_internal(const std::string& pkg_path, const std::string& outpu
         cursor += lfh.file_name_length + lfh.extra_field_length;
 
         fs::path file_out_path = fs::weakly_canonical(target_dir / filename, ec);
+        if (ec) {
+            return {status::invalid_argument, "Failed to resolve destination path for: " + filename};
+        }
 
-        auto [root_end, dummy] = std::mismatch(target_dir.begin(), target_dir.end(), file_out_path.begin());
+        auto [root_end, file_end] = std::mismatch(
+            target_dir.begin(), target_dir.end(),
+            file_out_path.begin(), file_out_path.end()
+        );
+
         if (root_end != target_dir.end()) {
             return {status::invalid_argument, "Path traversal attempt detected in filename: " + filename};
         }
 
-        const bool is_directory = !filename.empty() && filename.back() == '/';
+        const bool is_directory = !filename.empty() && (filename.back() == '/' || filename.back() == '\\');
 
         if (is_directory) {
             fs::create_directories(file_out_path, ec);
@@ -836,10 +850,11 @@ inline res unpack_internal(const std::string& pkg_path, const std::string& outpu
 
         fs::create_directories(file_out_path.parent_path(), ec);
 
-        std::vector<uint8_t> file_data(buffer.begin() + cursor, buffer.begin() + cursor + lfh.compressed_size);
-        cursor += lfh.compressed_size;
+        const uint8_t* file_bytes = buffer.data() + cursor;
+        const size_t current_file_size = lfh.compressed_size;
+        cursor += current_file_size;
 
-        if (crypto::calculate_crc32(file_data) != lfh.crc32) {
+        if (crypto::calculate_crc32(file_bytes, current_file_size) != lfh.crc32) {
             return {status::corrupted_data, "CRC32 mismatch on file: " + filename};
         }
 
@@ -847,7 +862,7 @@ inline res unpack_internal(const std::string& pkg_path, const std::string& outpu
         if (!out.is_open())
             return {status::io_error, "Failed to create output file: " + filename};
 
-        out.write(reinterpret_cast<const char*>(file_data.data()), file_data.size());
+        out.write(reinterpret_cast<const char*>(file_bytes), static_cast<std::streamsize>(current_file_size));
         if (!out.good()) {
             return {status::io_error, "Failed to write extracted file content: " + filename};
         }
@@ -856,7 +871,7 @@ inline res unpack_internal(const std::string& pkg_path, const std::string& outpu
     return {status::ok, "Unpacked successfully."};
 }
 
-inline read_res read_pack_internal(const std::string& pkg_path, std::span<const uint8_t> key = {}) {
+inline read_res read_pack_internal(const std::filesystem::path& pkg_path, std::span<const uint8_t> key = {}) {
     using namespace spk::respack::archive;
 
     std::ifstream in(pkg_path, std::ios::binary | std::ios::ate);
@@ -919,21 +934,7 @@ inline read_res read_pack_internal(const std::string& pkg_path, std::span<const 
     return {status::ok, "Read package successfully.", std::move(files)};
 }
 
-inline open_res open_pack_internal(std::vector<uint8_t> buffer, std::span<const uint8_t> key = {}) {
-    if (buffer.empty()) {
-        return {status::invalid_argument, "Package buffer is empty or unreadable.", {}};
-    }
-
-    package pkg;
-    auto res = pkg.init(std::move(buffer), key);
-    if (res.code != status::ok) {
-        return {res.code, res.message, {}};
-    }
-
-    return {status::ok, "Package opened successfully.", std::move(pkg)};
-}
-
-inline open_res open_pack_internal(const std::string& pkg_path, std::span<const uint8_t> key = {}) {
+inline open_res open_pack_internal(const std::filesystem::path& pkg_path, std::span<const uint8_t> key = {}) {
     std::ifstream in(pkg_path, std::ios::binary | std::ios::ate);
     if (!in.is_open())
         return {status::io_error, "Failed to open package file.", {}};
@@ -948,42 +949,52 @@ inline open_res open_pack_internal(const std::string& pkg_path, std::span<const 
         return {status::io_error, "Failed to read package file into memory.", {}};
     }
 
-    return open_pack_internal(std::move(buffer), key);
+    if (buffer.empty()) {
+        return {status::invalid_argument, "Package buffer is empty or unreadable.", {}};
+    }
+
+    package pkg;
+    auto res = pkg.init(std::move(buffer), key);
+    if (res.code != status::ok) {
+        return {res.code, res.message, {}};
+    }
+
+    return {status::ok, "Package opened successfully.", std::move(pkg)};
 }
 
 } // namespace detail
 
-inline res pack(const std::string& dir, const std::string& output_pkg) { 
+inline res pack(const std::filesystem::path& dir, const std::filesystem::path& output_pkg) { 
     return detail::pack_internal(dir, output_pkg); 
 }
-inline res pack(const std::string& dir, const std::string& output_pkg, std::span<const uint8_t> key) {
+inline res pack(const std::filesystem::path& dir, const std::filesystem::path& output_pkg, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty."};
     return detail::pack_internal(dir, output_pkg, key);
 }
 
-inline res unpack(const std::string& pkg_path, const std::string& output_dir) { 
+inline res unpack(const std::filesystem::path& pkg_path, const std::filesystem::path& output_dir) { 
     return detail::unpack_internal(pkg_path, output_dir); 
 }
-inline res unpack(const std::string& pkg_path, const std::string& output_dir, std::span<const uint8_t> key) {
+inline res unpack(const std::filesystem::path& pkg_path, const std::filesystem::path& output_dir, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty."};
     return detail::unpack_internal(pkg_path, output_dir, key);
 }
 
-inline read_res read_pack(const std::string& pkg_path) {
+inline read_res read_pack(const std::filesystem::path& pkg_path) {
     return detail::read_pack_internal(pkg_path);
 }
-inline read_res read_pack(const std::string& pkg_path, std::span<const uint8_t> key) {
+inline read_res read_pack(const std::filesystem::path& pkg_path, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty.", {}};
     return detail::read_pack_internal(pkg_path, key);
 }
 
-inline open_res open_pack(const std::string& pkg_path) {
+inline open_res open_pack(const std::filesystem::path& pkg_path) {
     return detail::open_pack_internal(pkg_path);
 }
-inline open_res open_pack(const std::string& pkg_path, std::span<const uint8_t> key) {
+inline open_res open_pack(const std::filesystem::path& pkg_path, std::span<const uint8_t> key) {
     if (key.empty())
         return {status::invalid_argument, "Key cannot be empty.", {}};
     return detail::open_pack_internal(pkg_path, key);
