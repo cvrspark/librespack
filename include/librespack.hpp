@@ -644,6 +644,9 @@ inline res pack_internal(const std::filesystem::path& dir, const std::filesystem
     }
 
     fs::path out_path = output_pkg;
+    if (out_path.has_parent_path()) {
+        fs::create_directories(out_path.parent_path());
+    }
     if (out_path.extension().empty()) {
         out_path += ".rvlt";
     }
