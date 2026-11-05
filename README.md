@@ -13,6 +13,7 @@ d888b    `Y8bod8P' 8""888P'  888bod8P' `Y888""8o `Y8bod8P' o888o o888o
 
 ## Main functions
 ```cpp
+// std >= c++23 
 // key converters
 spk::respack::key_from_string(const std::string& key_str); // std::array<uint8_t, 32>
 spk::respack::key_to_string(std::span<const uint8_t> key); // std::string
